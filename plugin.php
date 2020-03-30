@@ -1,109 +1,115 @@
 <?php
-/**
- * 插件管理
- * @copyright (c) Emlog All Rights Reserved
- */
 
-require_once 'globals.php';
 
-$plugin = isset($_GET['plugin']) ? $_GET['plugin'] : '';
+!defined('IN_UC') && exit('Access Denied');
 
-if ($action == '' && !$plugin) {
-    $Plugin_Model = new Plugin_Model();
-    $plugins = $Plugin_Model->getPlugins();
+class control extends pluginbase {
 
-    include View::getView('header');
-    require_once(View::getView('plugin'));
-    include View::getView('footer');
-    View::output();
-}
+	var $md5data = array();
 
-//激活
-if ($action == 'active') {
-    LoginAuth::checkToken();
-    $Plugin_Model = new Plugin_Model();
-    if ($Plugin_Model->activePlugin($plugin) ) {
-        $CACHE->updateCache('options');
-        emDirect("./plugin.php?active=1");
-    } else {
-        emDirect("./plugin.php?active_error=1");
-    }
-}
+	function control() {
+		$this->pluginbase();
+	}
 
-//禁用
-if ($action == 'inactive') {
-    LoginAuth::checkToken();
-    $Plugin_Model = new Plugin_Model();
-    $Plugin_Model->inactivePlugin($plugin);
-    $CACHE->updateCache('options');
-    emDirect("./plugin.php?inactive=1");
-}
+	function onindex() {
 
-//加载插件配置页面
-if ($action == '' && $plugin) {
-    include View::getView('header');
-    require_once "../content/plugins/{$plugin}/{$plugin}_setting.php";
-    plugin_setting_view();
-    include View::getView('footer');
-}
+		if(!$ucfiles = @file(UC_ROOT.'./control/admin/ucfiles.md5')) {
+			$this->message('file_check_failed');
+		}
 
-//保存插件设置
-if ($action == 'setting') {
-    if (!empty($_POST)) {
-        require_once "../content/plugins/{$plugin}/{$plugin}_setting.php";
-        if (false === plugin_setting()) {
-            emDirect("./plugin.php?plugin={$plugin}&error=1");
-        } else{
-            emDirect("./plugin.php?plugin={$plugin}&setting=1");
-        }
-    } else{
-        emDirect("./plugin.php?plugin={$plugin}&error=1");
-    }
-}
+		$this->load('app');
+		$applist = $_ENV['app']->get_apps();
+		$this->view->assign('applist', $applist);
 
-//删除插件
-if ($action == 'del') {
-    LoginAuth::checkToken();
-    $Plugin_Model = new Plugin_Model();
-    $Plugin_Model->inactivePlugin($plugin);
-    $pludir = preg_replace("/^([^\/]+)\/.*/", "$1", $plugin);
-    if (true === emDeleteFile('../content/plugins/' . $pludir)) {
-        $CACHE->updateCache('options');
-        emDirect("./plugin.php?activate_del=1");
-    } else {
-        emDirect("./plugin.php?error_a=1");
-    }
-}
+		$this->checkfiles('./', '\.php', 0, '\.php|\.xml');
+		$this->checkfiles('control/', '\.php');
+		$this->checkfiles('model/', '\.php');
+		$this->checkfiles('lib/', '\.php');
+		$this->checkfiles('view/', '\.php|\.htm');
+		$this->checkfiles('js/', '\.js');
 
-//上传zip插件
-if ($action == 'upload_zip') {
-    LoginAuth::checkToken();
-    $zipfile = isset($_FILES['pluzip']) ? $_FILES['pluzip'] : '';
+		foreach($ucfiles as $line) {
+			$file = trim(substr($line, 34));
+			$md5datanew[$file] = substr($line, 0, 32);
+			if($md5datanew[$file] != $this->md5data[$file]) {
+				$modifylist[$file] = $this->md5data[$file];
+			}
+			$md5datanew[$file] = $this->md5data[$file];
+		}
 
-    if ($zipfile['error'] == 4) {
-        emDirect("./plugin.php?error_d=1");
-    }
-    if (!$zipfile || $zipfile['error'] >= 1 || empty($zipfile['tmp_name'])) {
-        emMsg('插件上传失败');
-    }
-    if (getFileSuffix($zipfile['name']) != 'zip') {
-        emDirect("./plugin.php?error_f=1");
-    }
+		$weekbefore = $timestamp - 604800;
+		$addlist = @array_diff_assoc($this->md5data, $md5datanew);
+		$dellist = @array_diff_assoc($md5datanew, $this->md5data);
+		$modifylist = @array_diff_assoc($modifylist, $dellist);
+		$showlist = @array_merge($this->md5data, $md5datanew);
+		$doubt = 0;
+		$dirlist = $dirlog = array();
+		foreach($showlist as $file => $md5) {
+			$dir = dirname($file);
+			if(@array_key_exists($file, $modifylist)) {
+				$fileststus = 'modify';
+			} elseif(@array_key_exists($file, $dellist)) {
+				$fileststus = 'del';
+			} elseif(@array_key_exists($file, $addlist)) {
+				$fileststus = 'add';
+			} else {
+				$filemtime = @filemtime($file);
+				if($filemtime > $weekbefore) {
+					$fileststus = 'doubt';
+					$doubt++;
+				} else {
+					$fileststus = '';
+				}
+			}
+			if(file_exists($file)) {
+				$filemtime = @filemtime($file);
+				$fileststus && $dirlist[$fileststus][$dir][basename($file)] = array(number_format(filesize($file)).' Bytes', $this->date($filemtime));
+			} else {
+				$fileststus && $dirlist[$fileststus][$dir][basename($file)] = array('', '');
+			}
+		}
 
-    $ret = emUnZip($zipfile['tmp_name'], '../content/plugins/', 'plugin');
-    switch ($ret) {
-        case 0:
-            emDirect("./plugin.php?activate_install=1#tpllib");
-            break;
-        case -1:
-            emDirect("./plugin.php?error_e=1");
-            break;
-        case 1:
-        case 2:
-            emDirect("./plugin.php?error_b=1");
-            break;
-        case 3:
-            emDirect("./plugin.php?error_c=1");
-            break;
-    }
+		$result = $resultjs = '';
+		$dirnum = 0;
+		foreach($dirlist as $status => $filelist) {
+			$dirnum++;
+			$result .= '<div id="status_'.$status.'" style="display:'.($status != 'modify' ? 'none' : '').'">';
+			foreach($filelist as $dir => $files) {
+				$result .= '<br /><br /><u><b><a>'.$dir.'</a></b></u><br />';
+				foreach($files as $filename => $file) {
+					$result .= '<div style="clear:both"><b style="float:left;width: 30%">'.$filename.'</b><div style="float:left;width: 20%">'.$file[0].'</div><div style="float:left;width: 20%">'.$file[1].'</div></div>';
+				}
+			}
+			$result .= '<br /><br /></div>';
+			$resultjs .= '$(\'status_'.$status.'\').style.display=\'none\';';
+		}
+		$modifiedfiles = count($modifylist);
+		$deletedfiles = count($dellist);
+		$unknownfiles = count($addlist);
+
+		$result .= '<script>function showresult(o) {'.$resultjs.'$(\'status_\' + o).style.display=\'\';}</script>';
+		$this->view->assign('result', $result);
+		$this->view->assign('modifiedfiles', $modifiedfiles);
+		$this->view->assign('deletedfiles', $deletedfiles);
+		$this->view->assign('unknownfiles', $unknownfiles);
+		$this->view->assign('doubt', $doubt);
+		$this->view->display('plugin_filecheck');
+	}
+
+	function checkfiles($currentdir, $ext = '', $sub = 1, $skip = '') {
+		$dir = @opendir(UC_ROOT.$currentdir);
+		$exts = '/('.$ext.')$/i';
+		$skips = explode(',', $skip);
+
+		while($entry = @readdir($dir)) {
+			$file = $currentdir.$entry;
+			if($entry != '.' && $entry != '..' && (preg_match($exts, $entry) || $sub && is_dir($file)) && !in_array($entry, $skips)) {
+				if($sub && is_dir($file)) {
+					$this->checkfiles($file.'/', $ext, $sub, $skip);
+				} else {
+					$this->md5data[$file] = md5_file($file);
+				}
+			}
+		}
+	}
 }
